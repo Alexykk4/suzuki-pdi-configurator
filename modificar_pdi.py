@@ -3,6 +3,76 @@ import shutil
 import openpyxl
 import sys
 import subprocess
+import zipfile
+import re
+import tempfile
+
+def log_message(msg):
+    """Muestra un mensaje en consola y lo guarda en un archivo de depuración local."""
+    print(msg)
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        log_file = os.path.join(script_dir, "pdi_debug_log.txt")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+def strip_printer_settings_from_zip(xlsx_path):
+    """Desempaqueta el archivo Excel (.xlsx), elimina las configuraciones de impresora incrustadas (.bin) y limpia sus relaciones XML."""
+    log_message("Limpiando la caché de configuración de impresora del archivo Excel...")
+    temp_dir = tempfile.mkdtemp()
+    temp_zip_path = os.path.join(temp_dir, "temp.zip")
+    
+    try:
+        # Hacer una copia temporal del archivo
+        shutil.copyfile(xlsx_path, temp_zip_path)
+        
+        # Procesar los elementos del ZIP
+        with zipfile.ZipFile(temp_zip_path, 'r') as zin:
+            with zipfile.ZipFile(xlsx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    filename = item.filename
+                    
+                    # 1. Omitir la carpeta printerSettings y sus archivos binarios
+                    if "printerSettings" in filename:
+                        continue
+                        
+                    data = zin.read(filename)
+                    
+                    # 2. Eliminar referencias de printerSettings en los archivos de relaciones (.rels) de las hojas
+                    if filename.startswith("xl/worksheets/_rels/") and filename.endswith(".xml.rels"):
+                        data_str = data.decode('utf-8', errors='ignore')
+                        # Quitar etiquetas de relación tipo printerSettings
+                        data_str = re.sub(
+                            r'<Relationship[^>]*relationships/printerSettings[^>]*/>', 
+                            '', 
+                            data_str
+                        )
+                        data = data_str.encode('utf-8')
+                        
+                    # 3. Eliminar el atributo r:id que vincula printerSettings en el tag <pageSetup> de cada hoja
+                    elif filename.startswith("xl/worksheets/sheet") and filename.endswith(".xml"):
+                        data_str = data.decode('utf-8', errors='ignore')
+                        
+                        def clean_pagesetup(match):
+                            tag = match.group(0)
+                            # Remover el atributo r:id="..."
+                            tag_cleaned = re.sub(r'\s+r:id="[^"]+"', '', tag)
+                            return tag_cleaned
+                        
+                        data_str = re.sub(r'<pageSetup[^>]+/>', clean_pagesetup, data_str)
+                        data = data_str.encode('utf-8')
+                        
+                    zout.writestr(item, data)
+        log_message("--> Caché de impresora limpiada exitosamente del Excel.")
+    except Exception as e:
+        log_message(f"--> Advertencia al limpiar caché del Excel: {e}")
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
 
 def is_jimny_sheet_match(wb, sheet_name, jimny_doors):
     if not jimny_doors:
@@ -20,7 +90,7 @@ def is_jimny_sheet_match(wb, sheet_name, jimny_doors):
     return False
 
 def get_excel_printer_string(printer_name):
-    """Encuentra el puerto (ej. 'on Ne01:') del registro de Windows para construir la cadena ActivePrinter de Excel."""
+    """Encuentra el puerto (ej. 'on Ne01:') en el registro de Windows para construir la cadena ActivePrinter de Excel."""
     if os.name != 'nt':
         return printer_name
     try:
@@ -48,13 +118,13 @@ def get_excel_printer_string(printer_name):
             except Exception:
                 continue
     except Exception as e:
-        print(f"Advertencia al leer el puerto de la impresora del registro: {e}")
+        log_message(f"Advertencia al leer el puerto de la impresora del registro: {e}")
         
     return printer_name
 
 def get_current_duplex_state(printer_name):
     """Obtiene la configuración original de duplex mediante PowerShell o win32print."""
-    # 1. Intentar con PowerShell (compatible con usuarios estándar y redes)
+    # 1. Intentar con PowerShell
     try:
         cmd = f"(Get-PrintConfiguration -PrinterName '{printer_name}').DuplexingMode"
         res = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
@@ -63,7 +133,7 @@ def get_current_duplex_state(printer_name):
     except Exception:
         pass
 
-    # 2. Fallback a win32print con permisos de uso estándar
+    # 2. Fallback a win32print
     try:
         import win32print
         PRINTER_ACCESS_USE = 0x00000008
@@ -80,15 +150,17 @@ def set_duplex_state(printer_name, duplex=True):
     """Establece la impresión a doble cara (True) o normal (False)."""
     mode = "TwoSidedLongEdge" if duplex else "OneSided"
     
-    # 1. Intentar con PowerShell (recomendado para no administradores e impresoras de red)
+    # 1. Intentar con PowerShell
     try:
         cmd = f"Set-PrintConfiguration -PrinterName '{printer_name}' -DuplexingMode {mode}"
         res = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if res.returncode == 0:
-            print(f"Impresora configurada a DOBLE CARA ({mode}) vía PowerShell.")
+            log_message(f"Impresora configurada a DOBLE CARA ({mode}) vía PowerShell.")
             return True
-    except Exception:
-        pass
+        else:
+            log_message(f"PowerShell falló con código {res.returncode}: {res.stderr}")
+    except Exception as e:
+        log_message(f"Error al ejecutar PowerShell: {e}")
 
     # 2. Fallback a win32print
     try:
@@ -100,10 +172,10 @@ def set_duplex_state(printer_name, duplex=True):
         devmode.Duplex = 2 if duplex else 1
         win32print.SetPrinter(handle, 2, info, 0)
         win32print.ClosePrinter(handle)
-        print("Impresora configurada a DOBLE CARA vía win32print.")
+        log_message("Impresora configurada a DOBLE CARA vía win32print.")
         return True
     except Exception as e:
-        print(f"No se pudo forzar la doble cara automáticamente: {e}")
+        log_message(f"No se pudo forzar la doble cara vía win32print: {e}")
         return False
 
 def restore_duplex_state(printer_name, method, original_val):
@@ -114,7 +186,7 @@ def restore_duplex_state(printer_name, method, original_val):
         try:
             cmd = f"Set-PrintConfiguration -PrinterName '{printer_name}' -DuplexingMode {original_val}"
             subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
-            print("Configuración original de la impresora restaurada vía PowerShell.")
+            log_message("Configuración original de la impresora restaurada vía PowerShell.")
         except Exception:
             pass
     elif method == "win32print":
@@ -127,7 +199,7 @@ def restore_duplex_state(printer_name, method, original_val):
             devmode.Duplex = original_val
             win32print.SetPrinter(handle, 2, info, 0)
             win32print.ClosePrinter(handle)
-            print("Configuración original de la impresora restaurada vía win32print.")
+            log_message("Configuración original de la impresora restaurada vía win32print.")
         except Exception:
             pass
 
@@ -143,16 +215,15 @@ def process_car():
     if not os.path.exists(excel_file):
         excel_file = "FORMATO PDI.xlsx"
         if not os.path.exists(excel_file):
-            print("Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
-            print("Por favor, asegúrate de colocar este script en la misma carpeta que el archivo Excel.")
+            log_message("Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
             return False
 
     # 2. Cargar el libro de trabajo (conservando fórmulas)
-    print("Cargando formato Excel...")
+    log_message("Cargando formato Excel...")
     try:
         wb = openpyxl.load_workbook(excel_file)
     except Exception as e:
-        print(f"Error al abrir el archivo Excel: {e}")
+        log_message(f"Error al abrir el archivo Excel: {e}")
         return False
 
     sheet_names = wb.sheetnames
@@ -291,7 +362,7 @@ def process_car():
                 break
 
     if not matched_sheet_name:
-        print(f"\nError: No se pudo encontrar ninguna plantilla para {selected_model}.")
+        log_message(f"Error: No se pudo encontrar ninguna plantilla para {selected_model}.")
         return False
 
     print(f"\n--> Plantilla seleccionada: '{matched_sheet_name}'")
@@ -351,7 +422,7 @@ def process_car():
     part4 = vin_end
     
     new_vin = part1 + part2 + part3 + part4
-    print(f"\n--> Nuevo VIN generado: {new_vin}")
+    log_message(f"--> Nuevo VIN generado: {new_vin}")
 
     # 8. Modificar la hoja de Excel
     clean_sheet_title = matched_sheet_name.replace("OK", "").replace("(2)", "").strip()
@@ -366,26 +437,30 @@ def process_car():
 
     # 9. Hacer respaldo y guardar archivo
     backup_file = os.path.join(script_dir, "FORMATO PDI_backup.xlsx")
-    print(f"\nCreando respaldo en: {backup_file}")
+    log_message(f"Creando respaldo en: {backup_file}")
     try:
         shutil.copyfile(excel_file, backup_file)
     except Exception as e:
-        print(f"Advertencia: No se pudo crear el archivo de respaldo: {e}")
+        log_message(f"Advertencia: No se pudo crear el archivo de respaldo: {e}")
 
-    print("Guardando cambios en Excel...")
+    log_message("Guardando cambios en Excel...")
     try:
         wb.save(excel_file)
         wb.close()
-        print("¡Cambios guardados con éxito!")
+        log_message("¡Cambios guardados con éxito!")
     except Exception as e:
-        print(f"Error al guardar los cambios: {e}")
-        print("Asegúrate de que el archivo Excel no esté abierto en otro programa.")
+        log_message(f"Error al guardar los cambios: {e}")
+        log_message("Asegúrate de que el archivo Excel no esté abierto en otro programa.")
         return False
 
+    # 9.5 LIMPIAR CACHÉ DE IMPRESORA DEL ZIP (.xlsx)
+    # Esto elimina toda preferencia de impresora previa del archivo
+    strip_printer_settings_from_zip(excel_file)
+
     # 10. Comando de impresión rápida para Windows
-    print("\n" + "=" * 40)
-    print("              IMPRESIÓN")
-    print("=" * 40)
+    log_message("\n" + "=" * 40)
+    log_message("              IMPRESIÓN")
+    log_message("=" * 40)
     
     abs_excel_path = os.path.abspath(excel_file)
     
@@ -395,13 +470,14 @@ def process_car():
         
         # 10a. Configurar la impresora para impresión a doble cara
         printer_name = win32print.GetDefaultPrinter()
+        log_message(f"Impresora predeterminada detectada: '{printer_name}'")
         method, original_val = get_current_duplex_state(printer_name)
         
         # Cambiar el duplex
         set_duplex_state(printer_name, duplex=True)
 
         # 10b. Imprimir la hoja usando Excel COM
-        print("Iniciando instancia aislada de Excel en segundo plano...")
+        log_message("Iniciando instancia aislada de Excel en segundo plano...")
         excel_app = win32com.client.DispatchEx("Excel.Application")
         excel_app.Visible = False
         
@@ -414,9 +490,9 @@ def process_car():
             try:
                 excel_printer_str = get_excel_printer_string(printer_name)
                 excel_app.ActivePrinter = excel_printer_str
-                print(f"Impresora activa configurada en Excel: '{excel_printer_str}' (fuerza recarga de driver)")
+                log_message(f"Impresora activa configurada en Excel: '{excel_printer_str}' (fuerza recarga de driver)")
             except Exception as pe:
-                print(f"Advertencia: No se pudo asignar ActivePrinter en Excel: {pe}")
+                log_message(f"Advertencia: No se pudo asignar ActivePrinter en Excel: {pe}")
 
             if workbook is not None:
                 active_sheet = workbook.ActiveSheet
@@ -426,20 +502,20 @@ def process_car():
                         active_sheet.PageSetup.Zoom = False
                         active_sheet.PageSetup.FitToPagesWide = 1
                         active_sheet.PageSetup.FitToPagesTall = 2
-                        print("Ajuste de página configurado: Ancho = 1 pág., Alto = 2 págs. (1 hoja física doble cara).")
+                        log_message("Ajuste de página configurado: Ancho = 1 pág., Alto = 2 págs. (1 hoja física doble cara).")
                     except Exception as pe:
-                        print(f"Advertencia: No se pudo configurar el ajuste de tamaño de página: {pe}")
+                        log_message(f"Advertencia: No se pudo configurar el ajuste de tamaño de página: {pe}")
                     
-                    print(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
+                    log_message(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
                     active_sheet.PrintOut()
                 else:
-                    print("Error: No se pudo acceder a la hoja activa.")
+                    log_message("Error: No se pudo acceder a la hoja activa.")
                 workbook.Close(False)
-                print("¡Impresión enviada correctamente!")
+                log_message("¡Impresión enviada correctamente!")
             else:
-                print("Error: Excel no pudo abrir el libro de trabajo.")
+                log_message("Error: Excel no pudo abrir el libro de trabajo.")
         except Exception as e:
-            print(f"Error durante el proceso de impresión con Excel: {e}")
+            log_message(f"Error durante el proceso de impresión con Excel: {e}")
         finally:
             excel_app.Quit()
 
@@ -447,20 +523,29 @@ def process_car():
         restore_duplex_state(printer_name, method, original_val)
             
     except ImportError:
-        print("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
+        log_message("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
         if hasattr(os, 'startfile'):
-            print("Intentando enviar la impresión usando el comando estándar de Windows...")
+            log_message("Intentando enviar la impresión usando el comando estándar de Windows...")
             try:
                 os.startfile(abs_excel_path, "print")
-                print("¡Comando de impresión de Windows ejecutado!")
+                log_message("¡Comando de impresión de Windows ejecutado!")
             except Exception as e:
-                print(f"No se pudo imprimir automáticamente: {e}")
+                log_message(f"No se pudo imprimir automáticamente: {e}")
         else:
-            print("El comando de impresión rápida de Windows (os.startfile) no está disponible en este sistema operativo.")
+            log_message("El comando de impresión rápida de Windows (os.startfile) no está disponible en este sistema operativo.")
             
     return True
 
 def main():
+    # Eliminar log de depuración viejo al iniciar
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        log_file = os.path.join(script_dir, "pdi_debug_log.txt")
+        if os.path.exists(log_file):
+            os.remove(log_file)
+    except Exception:
+        pass
+
     while True:
         process_car()
         
