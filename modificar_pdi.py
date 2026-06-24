@@ -1,6 +1,28 @@
 import os
 import shutil
 import openpyxl
+import sys
+
+def check_and_elevate():
+    """Eleva los privilegios del script a Administrador en Windows si es necesario."""
+    if os.name == 'nt':
+        import ctypes
+        try:
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                print("Elevando privilegios a Administrador para configurar la impresora a doble cara...")
+                params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
+                if getattr(sys, 'frozen', False):
+                    # Si está compilado con PyInstaller (.exe)
+                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+                else:
+                    # Si se ejecuta como script .py
+                    script_path = os.path.abspath(sys.argv[0])
+                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script_path}" {params}', None, 1)
+                sys.exit(0)
+        except Exception as e:
+            print(f"Error al intentar elevar privilegios automáticamente: {e}")
+            print("Por favor, ejecuta este programa haciendo clic derecho y seleccionando 'Ejecutar como administrador'.")
+            input("\nPresiona Enter para continuar...")
 
 def is_jimny_sheet_match(wb, sheet_name, jimny_doors):
     if not jimny_doors:
@@ -310,6 +332,7 @@ def process_car():
         printer_name, original_duplex = None, None
         try:
             printer_name = win32print.GetDefaultPrinter()
+            # Solicitar acceso de administración de impresora (requiere privilegios elevados, los cuales ya garantizamos con check_and_elevate)
             PRINTER_ALL_ACCESS = 0xF0000 | 0x0004 | 0x0008 | 0x0001 | 0x0002
             handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ALL_ACCESS})
             info = win32print.GetPrinter(handle, 2)
@@ -320,10 +343,10 @@ def process_car():
             devmode.Duplex = 2
             win32print.SetPrinter(handle, 2, info, 0)
             win32print.ClosePrinter(handle)
-            print(f"Impresora '{printer_name}' configurada temporalmente a DOBLE CARA.")
+            print(f"Impresora '{printer_name}' configurada a DOBLE CARA con éxito.")
         except Exception as e:
-            print(f"Advertencia: No se pudo forzar la impresión a doble cara por código: {e}")
-            print("Se imprimirá con la configuración por defecto de la impresora.")
+            print(f"Error: No se pudo configurar la impresora a doble cara automáticamente: {e}")
+            print("Por favor, asegúrate de haber otorgado los permisos de administrador al abrir la aplicación.")
 
         # 10b. Imprimir la hoja usando Excel COM
         print("Iniciando instancia aislada de Excel en segundo plano...")
@@ -370,7 +393,7 @@ def process_car():
                 devmode.Duplex = original_duplex
                 win32print.SetPrinter(handle, 2, info, 0)
                 win32print.ClosePrinter(handle)
-                print("Configuración original de la impresora restaurada con éxito.")
+                print("Configuración original de la impresora restaurada.")
             except Exception as e:
                 print(f"Advertencia: No se pudo restaurar el duplex original de la impresora: {e}")
             
@@ -389,6 +412,9 @@ def process_car():
     return True
 
 def main():
+    # Elevar privilegios al inicio del programa en Windows para garantizar acceso a la impresora
+    check_and_elevate()
+
     while True:
         process_car()
         
