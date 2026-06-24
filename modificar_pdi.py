@@ -29,8 +29,7 @@ def check_and_elevate():
             input("\nPresiona Enter para continuar...")
 
 def log_message(msg):
-    """Muestra un mensaje en consola y lo guarda en un archivo de depuración local."""
-    print(msg)
+    """Guarda un mensaje en el archivo de depuración local sin mostrarlo en la consola."""
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         log_file = os.path.join(script_dir, "pdi_debug_log.txt")
@@ -38,6 +37,11 @@ def log_message(msg):
             f.write(msg + "\n")
     except Exception:
         pass
+
+def log_user(msg):
+    """Muestra un mensaje en la consola y lo guarda en el archivo de depuración."""
+    print(msg)
+    log_message(msg)
 
 def strip_printer_settings_from_zip(xlsx_path):
     """Desempaqueta el archivo Excel (.xlsx), elimina las configuraciones de impresora incrustadas (.bin) y limpia sus relaciones XML."""
@@ -441,15 +445,15 @@ def process_car():
     if not os.path.exists(excel_file):
         excel_file = "FORMATO PDI.xlsx"
         if not os.path.exists(excel_file):
-            log_message("Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
+            log_user("Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
             return False
 
     # 2. Cargar el libro de trabajo (conservando fórmulas)
-    log_message("Cargando formato Excel...")
+    log_user("Cargando formato Excel...")
     try:
         wb = openpyxl.load_workbook(excel_file)
     except Exception as e:
-        log_message(f"Error al abrir el archivo Excel: {e}")
+        log_user(f"Error al abrir el archivo Excel: {e}")
         return False
 
     sheet_names = wb.sheetnames
@@ -588,7 +592,7 @@ def process_car():
                 break
 
     if not matched_sheet_name:
-        log_message(f"Error: No se pudo encontrar ninguna plantilla para {selected_model}.")
+        log_user(f"Error: No se pudo encontrar ninguna plantilla para {selected_model}.")
         return False
 
     print(f"\n--> Plantilla seleccionada: '{matched_sheet_name}'")
@@ -648,7 +652,7 @@ def process_car():
     part4 = vin_end
     
     new_vin = part1 + part2 + part3 + part4
-    log_message(f"--> Nuevo VIN generado: {new_vin}")
+    log_user(f"--> Nuevo VIN generado: {new_vin}")
 
     # 8. Modificar la hoja de Excel
     clean_sheet_title = matched_sheet_name.replace("OK", "").replace("(2)", "").strip()
@@ -669,23 +673,23 @@ def process_car():
     except Exception as e:
         log_message(f"Advertencia: No se pudo crear el archivo de respaldo: {e}")
 
-    log_message("Guardando cambios en Excel...")
+    log_user("Guardando cambios en Excel...")
     try:
         wb.save(excel_file)
         wb.close()
-        log_message("¡Cambios guardados con éxito!")
+        log_user("¡Cambios guardados con éxito!")
     except Exception as e:
-        log_message(f"Error al guardar los cambios: {e}")
-        log_message("Asegúrate de que el archivo Excel no esté abierto en otro programa.")
+        log_user(f"Error al guardar los cambios: {e}")
+        log_user("Asegúrate de que el archivo Excel no esté abierto en otro programa.")
         return False
 
     # 9.5 LIMPIAR CACHÉ DE IMPRESORA DEL ZIP (.xlsx)
     strip_printer_settings_from_zip(excel_file)
 
     # 10. Comando de impresión rápida para Windows
-    log_message("\n" + "=" * 40)
-    log_message("              IMPRESIÓN")
-    log_message("=" * 40)
+    log_user("\n" + "=" * 40)
+    log_user("              IMPRESIÓN")
+    log_user("=" * 40)
     
     abs_excel_path = os.path.abspath(excel_file)
     
@@ -694,28 +698,16 @@ def process_car():
         import win32print
         
         # 10a. Configurar la impresora para impresión a doble cara
-        # Mostrar advertencia específica de Kyocera
-        print("\n" + "!" * 60)
-        print("IMPORTANTE (Impresoras Kyocera ECOSYS):")
-        print("Para que la impresión a DOBLE CARA funcione, el driver de la impresora")
-        print("debe tener habilitada la unidad de dúplex en Windows:")
-        print("1. Abre el Panel de Control > Dispositivos e Impresoras.")
-        print("2. Clic derecho sobre tu impresora Kyocera > 'Propiedades de la impresora'.")
-        print("3. Ve a la pestaña 'Configuración de dispositivo' (Device Settings).")
-        print("4. Asegúrate de que 'Unidad de dúplex' (Duplex Unit) esté como 'Instalado'.")
-        print("5. Si está disponible, haz clic en el botón 'Autoconfigurar' (Auto Configure).")
-        print("!" * 60 + "\n")
-
         # Buscar si hay un perfil duplicado de doble cara o crearlo si lo autoriza el usuario
         duplex_printer = ensure_duplex_printer_profile()
         
         if duplex_printer:
             printer_name = duplex_printer
             method, original_val = None, None
-            log_message(f"Uso de impresora física preconfigurada: '{printer_name}'")
+            log_user(f"Uso de impresora de doble cara seleccionada: '{printer_name}'")
         else:
             printer_name = win32print.GetDefaultPrinter()
-            log_message(f"Impresora predeterminada detectada: '{printer_name}'")
+            log_user(f"Impresora predeterminada detectada: '{printer_name}'")
             method, original_val = get_current_duplex_state(printer_name)
             
             # Cambiar el duplex en el driver
@@ -747,16 +739,16 @@ def process_car():
                     except Exception as pe:
                         log_message(f"Advertencia: No se pudo configurar el ajuste de tamaño de página: {pe}")
                     
-                    log_message(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
+                    log_user(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
                     active_sheet.PrintOut()
                 else:
-                    log_message("Error: No se pudo acceder a la hoja activa.")
+                    log_user("Error: No se pudo acceder a la hoja activa.")
                 workbook.Close(False)
-                log_message("¡Impresión enviada correctamente!")
+                log_user("¡Impresión enviada correctamente!")
             else:
-                log_message("Error: Excel no pudo abrir el libro de trabajo.")
+                log_user("Error: Excel no pudo abrir el libro de trabajo.")
         except Exception as e:
-            log_message(f"Error durante el proceso de impresión con Excel: {e}")
+            log_user(f"Error durante el proceso de impresión con Excel: {e}")
         finally:
             excel_app.Quit()
 
@@ -765,16 +757,16 @@ def process_car():
             restore_duplex_state(printer_name, method, original_val)
             
     except ImportError:
-        log_message("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
+        log_user("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
         if hasattr(os, 'startfile'):
-            log_message("Intentando enviar la impresión usando el comando estándar de Windows...")
+            log_user("Intentando enviar la impresión usando el comando estándar de Windows...")
             try:
                 os.startfile(abs_excel_path, "print")
-                log_message("¡Comando de impresión de Windows ejecutado!")
+                log_user("¡Comando de impresión de Windows ejecutado!")
             except Exception as e:
-                log_message(f"No se pudo imprimir automáticamente: {e}")
+                log_user(f"No se pudo imprimir automáticamente: {e}")
         else:
-            log_message("El comando de impresión rápida de Windows (os.startfile) no está disponible en este sistema operativo.")
+            log_user("El comando de impresión rápida de Windows (os.startfile) no está disponible en este sistema operativo.")
             
     return True
 
