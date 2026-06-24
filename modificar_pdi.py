@@ -101,58 +101,31 @@ def process_car():
                 pass
             print("Opción inválida. Intenta de nuevo.")
 
-    # 4. Extraer líneas disponibles para el modelo seleccionado (aplicando filtro de puertas si es Jimny)
-    lines_set = set()
-    for name in sheet_names:
-        name_clean = name.strip()
-        name_upper = name_clean.upper()
-        if selected_model == "VITARA" and "GRAND VITARA" in name_upper:
-            continue
-        if selected_model in name_upper:
-            if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, name_clean, jimny_doors):
-                continue
-                
-            cleaned = name_upper.replace("OK", "").replace("(2)", "").strip()
-            words = cleaned.split()
-            try:
-                model_len = len(selected_model.split())
-                trans_idx = -1
-                for idx, w in enumerate(words):
-                    if w in ["TA", "TM", "CVT"]:
-                        trans_idx = idx
-                        break
-                if trans_idx != -1:
-                    line_words = words[model_len:trans_idx]
-                    line_str = " ".join(line_words)
-                    if line_str:
-                        lines_set.add(line_str)
-            except Exception:
-                pass
-                
-    lines_list = sorted(list(lines_set))
+    # 4. Líneas predefinidas para cada modelo
+    model_lines = {
+        "BALENO": ["GLS", "GLX"],
+        "SWIFT": ["GLS", "GLX", "SPORT"],
+        "DZIRE": ["GLS", "GLX"],
+        "ERTIGA": ["GLS", "GLX", "XL7"],
+        "FRONX": ["GLS", "GLX"],
+        "JIMNY": ["GLS", "GLX"]
+    }
     
-    # Seleccionar o escribir la línea
-    selected_line = ""
-    if lines_list:
-        print(f"\nLíneas disponibles para {selected_model}:")
-        for idx, line_opt in enumerate(lines_list, 1):
-            print(f"  {idx}. {line_opt}")
-        print(f"  {len(lines_list) + 1}. Escribir otra línea manualmente")
+    lines_list = model_lines.get(selected_model, ["GLS", "GLX"])
+    
+    print(f"\nLíneas disponibles para {selected_model}:")
+    for idx, line_opt in enumerate(lines_list, 1):
+        print(f"  {idx}. {line_opt}")
         
-        while True:
-            try:
-                sel = int(input(f"Selecciona la línea (1-{len(lines_list) + 1}): "))
-                if 1 <= sel <= len(lines_list):
-                    selected_line = lines_list[sel - 1]
-                    break
-                elif sel == len(lines_list) + 1:
-                    selected_line = input("Escribe la línea (ej. GLS, GLX, SPORT): ").strip().upper()
-                    break
-            except ValueError:
-                pass
-            print("Opción inválida. Intenta de nuevo.")
-    else:
-        selected_line = input("\n¿Qué línea es? (ej. GLS, GLX, SPORT): ").strip().upper()
+    while True:
+        try:
+            sel = int(input(f"Selecciona la línea (1-{len(lines_list)}): "))
+            if 1 <= sel <= len(lines_list):
+                selected_line = lines_list[sel - 1]
+                break
+        except ValueError:
+            pass
+        print("Opción inválida. Intenta de nuevo.")
 
     # Preguntar por la transmisión (TA, TM o CVT)
     print("\nTransmisiones:")
@@ -332,14 +305,12 @@ def process_car():
         printer_name, original_duplex = None, None
         try:
             printer_name = win32print.GetDefaultPrinter()
-            # Solicitar acceso de administración de impresora (requiere privilegios elevados, los cuales ya garantizamos con check_and_elevate)
             PRINTER_ALL_ACCESS = 0xF0000 | 0x0004 | 0x0008 | 0x0001 | 0x0002
             handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ALL_ACCESS})
             info = win32print.GetPrinter(handle, 2)
             devmode = info['pDevMode']
             original_duplex = getattr(devmode, 'Duplex', 1)
             
-            # Duplex = 2 (doble cara, voltear por el borde largo)
             devmode.Duplex = 2
             win32print.SetPrinter(handle, 2, info, 0)
             win32print.ClosePrinter(handle)
