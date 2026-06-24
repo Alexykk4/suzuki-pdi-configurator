@@ -87,7 +87,6 @@ def process_car():
         if selected_model == "VITARA" and "GRAND VITARA" in name_upper:
             continue
         if selected_model in name_upper:
-            # Si es Jimny, aplicar filtro de puertas
             if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, name_clean, jimny_doors):
                 continue
                 
@@ -211,6 +210,14 @@ def process_car():
     print(f"\n--> Plantilla seleccionada: '{matched_sheet_name}'")
     sheet = wb[matched_sheet_name]
 
+    # Ajustar la página en openpyxl también por seguridad
+    try:
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 2
+    except Exception:
+        pass
+
     # 6. Preguntar por los demás datos
     color = input("\n¿Qué color es? (ej. AZUL PASCAL, PLATA SIBERIA): ").strip().upper()
     key_num = input("¿Qué número de llave es? (opcional, presiona Enter para mantener la del formato): ").strip()
@@ -297,36 +304,78 @@ def process_car():
     
     try:
         import win32com.client
+        import win32print
+        
+        # 10a. Configurar la impresora para impresión a doble cara (Duplex = 2)
+        printer_name, original_duplex = None, None
+        try:
+            printer_name = win32print.GetDefaultPrinter()
+            PRINTER_ALL_ACCESS = 0xF0000 | 0x0004 | 0x0008 | 0x0001 | 0x0002
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ALL_ACCESS})
+            info = win32print.GetPrinter(handle, 2)
+            devmode = info['pDevMode']
+            original_duplex = getattr(devmode, 'Duplex', 1)
+            
+            # Duplex = 2 (doble cara, voltear por el borde largo)
+            devmode.Duplex = 2
+            win32print.SetPrinter(handle, 2, info, 0)
+            win32print.ClosePrinter(handle)
+            print(f"Impresora '{printer_name}' configurada temporalmente a DOBLE CARA.")
+        except Exception as e:
+            print(f"Advertencia: No se pudo forzar la impresión a doble cara por código: {e}")
+            print("Se imprimirá con la configuración por defecto de la impresora.")
+
+        # 10b. Imprimir la hoja usando Excel COM
         print("Iniciando instancia aislada de Excel en segundo plano...")
-        # Usar DispatchEx para forzar una nueva instancia libre de bloqueos
         excel_app = win32com.client.DispatchEx("Excel.Application")
         excel_app.Visible = False
         
         try:
             workbook = excel_app.Workbooks.Open(abs_excel_path)
             if workbook is None:
-                # Si fallara, intentar capturar la ventana activa
                 workbook = excel_app.ActiveWorkbook
                 
             if workbook is not None:
                 active_sheet = workbook.ActiveSheet
                 if active_sheet is not None:
-                    # En Excel COM la propiedad se llama 'Name' (no 'Title')
+                    # Configurar para que la hoja activa se ajuste exactamente a 1 página de ancho por 2 de alto
+                    try:
+                        active_sheet.PageSetup.Zoom = False
+                        active_sheet.PageSetup.FitToPagesWide = 1
+                        active_sheet.PageSetup.FitToPagesTall = 2
+                        print("Ajuste de página configurado: Ancho = 1 pág., Alto = 2 págs. (1 hoja física doble cara).")
+                    except Exception as pe:
+                        print(f"Advertencia: No se pudo configurar el ajuste de tamaño de página: {pe}")
+                    
                     print(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
                     active_sheet.PrintOut()
                 else:
                     print("Error: No se pudo acceder a la hoja activa.")
                 workbook.Close(False)
-                print("¡Impresión enviada correctamente a tu impresora predeterminada!")
+                print("¡Impresión enviada correctamente!")
             else:
                 print("Error: Excel no pudo abrir el libro de trabajo.")
         except Exception as e:
             print(f"Error durante el proceso de impresión con Excel: {e}")
         finally:
             excel_app.Quit()
+
+        # 10c. Restaurar la configuración original de duplex de la impresora
+        if printer_name and original_duplex is not None:
+            try:
+                PRINTER_ALL_ACCESS = 0xF0000 | 0x0004 | 0x0008 | 0x0001 | 0x0002
+                handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ALL_ACCESS})
+                info = win32print.GetPrinter(handle, 2)
+                devmode = info['pDevMode']
+                devmode.Duplex = original_duplex
+                win32print.SetPrinter(handle, 2, info, 0)
+                win32print.ClosePrinter(handle)
+                print("Configuración original de la impresora restaurada con éxito.")
+            except Exception as e:
+                print(f"Advertencia: No se pudo restaurar el duplex original de la impresora: {e}")
             
     except ImportError:
-        print("El módulo 'pywin32' no está instalado en este sistema Python.")
+        print("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
         if hasattr(os, 'startfile'):
             print("Intentando enviar la impresión usando el comando estándar de Windows...")
             try:
@@ -341,10 +390,8 @@ def process_car():
 
 def main():
     while True:
-        # Ejecutar el flujo para un vehículo
         process_car()
         
-        # Preguntar si desea continuar o salir
         print("\n" + "-" * 60)
         opcion = input("¿Deseas configurar otro automóvil? (S/N): ").strip().upper()
         if opcion not in ["S", "SI"]:
@@ -352,7 +399,7 @@ def main():
             print("Proceso finalizado.")
             input("Presiona Enter para salir...")
             break
-        print("\n" * 2) # Espaciado entre ejecuciones
+        print("\n" * 2)
 
 if __name__ == "__main__":
     main()
