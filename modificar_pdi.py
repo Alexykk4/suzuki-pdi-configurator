@@ -7,6 +7,27 @@ import zipfile
 import re
 import tempfile
 
+def check_and_elevate():
+    """Eleva los privilegios del script a Administrador en Windows si es necesario."""
+    if os.name == 'nt':
+        import ctypes
+        try:
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                log_message("Elevando privilegios a Administrador para configurar la impresora a doble cara...")
+                params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
+                if getattr(sys, 'frozen', False):
+                    # Si está compilado con PyInstaller (.exe)
+                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+                else:
+                    # Si se ejecuta como script .py
+                    script_path = os.path.abspath(sys.argv[0])
+                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script_path}" {params}', None, 1)
+                sys.exit(0)
+        except Exception as e:
+            log_message(f"Error al intentar elevar privilegios automáticamente: {e}")
+            log_message("Por favor, ejecuta este programa haciendo clic derecho y seleccionando 'Ejecutar como administrador'.")
+            input("\nPresiona Enter para continuar...")
+
 def log_message(msg):
     """Muestra un mensaje en consola y lo guarda en un archivo de depuración local."""
     print(msg)
@@ -102,6 +123,9 @@ def get_excel_printer_string(printer_name):
                             parts = value.split(",")
                             if len(parts) >= 2:
                                 port = parts[1]
+                                # Asegurar que el puerto termine con dos puntos (esencial para Excel ActivePrinter)
+                                if not port.endswith(":"):
+                                    port += ":"
                                 winreg.CloseKey(key)
                                 return f"{name} on {port}"
                         i += 1
@@ -116,8 +140,8 @@ def get_excel_printer_string(printer_name):
     return printer_name
 
 def set_excel_active_printer(excel_app, printer_name):
-    """Prueba dinámicamente diferentes puertos de red (Ne00 a Ne99) en inglés y español para configurar ActivePrinter."""
-    # 1. Intentar configurar directamente
+    """Detecta dinámicamente el idioma de Excel (on / en) y configura la propiedad ActivePrinter con su puerto."""
+    # 1. Intentar configurar la impresora directamente
     try:
         excel_app.ActivePrinter = printer_name
         log_message(f"Impresora activa configurada directamente en Excel: '{printer_name}'")
@@ -125,51 +149,150 @@ def set_excel_active_printer(excel_app, printer_name):
     except Exception:
         pass
 
-    # 2. Intentar puertos en Inglés (e.g. "Nombre on Ne01:")
-    for i in range(100):
-        try:
-            port_str = f"{printer_name} on Ne{i:02d}:"
-            excel_app.ActivePrinter = port_str
-            log_message(f"Impresora activa configurada en Excel: '{port_str}'")
-            return True
-        except Exception:
-            pass
+    # 2. Detectar dinámicamente si Excel espera " on " (Inglés) o " en " (Español)
+    separator = " on "
+    try:
+        current_active = excel_app.ActivePrinter
+        log_message(f"ActivePrinter actual detectado en Excel: '{current_active}'")
+        if " en " in current_active:
+            separator = " en "
+            log_message("Excel en Español detectado de manera dinámica.")
+        else:
+            log_message("Excel en Inglés detectado de manera dinámica.")
+    except Exception as e:
+        log_message(f"No se pudo consultar el ActivePrinter actual: {e}")
 
-    # 3. Intentar puertos en Español (e.g. "Nombre en Ne01:")
-    for i in range(100):
-        try:
-            port_str = f"{printer_name} en Ne{i:02d}:"
-            excel_app.ActivePrinter = port_str
-            log_message(f"Impresora activa configurada en Excel: '{port_str}' (Windows en Español)")
-            return True
-        except Exception:
-            pass
-
-    # 4. Fallback leyendo el registro de Windows
+    # 3. Intentar construir la cadena usando el puerto real leído del registro de Windows
     excel_printer_str = get_excel_printer_string(printer_name)
     if excel_printer_str != printer_name:
+        # Reemplazar el separador si detectamos español
+        final_printer_str = excel_printer_str
+        if separator == " en " and " on " in excel_printer_str:
+            final_printer_str = excel_printer_str.replace(" on ", " en ")
+        
         try:
-            excel_app.ActivePrinter = excel_printer_str
-            log_message(f"Impresora activa configurada desde Registro: '{excel_printer_str}'")
+            excel_app.ActivePrinter = final_printer_str
+            log_message(f"Impresora activa configurada desde Puerto de Registro: '{final_printer_str}'")
+            return True
+        except Exception as e:
+            log_message(f"Fallo al asignar la impresora del registro '{final_printer_str}': {e}")
+
+    # 4. Fallback de barrido de puertos NeXX como último recurso
+    for i in range(100):
+        try:
+            port_str = f"{printer_name}{separator}Ne{i:02d}:"
+            excel_app.ActivePrinter = port_str
+            log_message(f"Impresora activa configurada mediante barrido NeXX: '{port_str}'")
             return True
         except Exception:
             pass
 
-        # Probar la versión traducida al español del registro
-        if " on " in excel_printer_str:
-            spanish_str = excel_printer_str.replace(" on ", " en ")
-            try:
-                excel_app.ActivePrinter = spanish_str
-                log_message(f"Impresora activa configurada desde Registro (Español): '{spanish_str}'")
-                return True
-            except Exception:
-                pass
+    raise Exception("No se pudo asociar la impresora con ningún puerto de Excel.")
 
-    raise Exception("No se pudo asociar la impresora con ningún puerto de red de Excel (NeXX:).")
+def ensure_duplex_printer_profile():
+    """Detecta o crea una copia de la impresora predeterminada configurada a doble cara en el sistema."""
+    if os.name != 'nt':
+        return None
+    try:
+        import win32print
+        import win32con
+        
+        # 1. Buscar si ya existe una impresora que contenga DOBLE CARA o DUPLEX
+        printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
+        for _, name, _, _ in printers:
+            name_up = name.upper()
+            if "DOBLE CARA" in name_up or "DUPLEX" in name_up:
+                log_message(f"--> Impresora especial de doble cara preconfigurada detectada: '{name}'")
+                return name
+                
+        # 2. Si no existe, preguntar si se desea crear una copia configurada a doble cara
+        default_printer = win32print.GetDefaultPrinter()
+        print("\n" + "=" * 60)
+        print("CONFIGURACIÓN AUTOMÁTICA DE DOBLE CARA")
+        print("=" * 60)
+        print(f"Para asegurar la impresión a doble cara en tu impresora Kyocera,")
+        print(f"podemos crear una copia de tu impresora '{default_printer}'")
+        print("configurada permanentemente a doble cara en Windows.")
+        print("-" * 60)
+        
+        crear = input("¿Deseas crear esta copia de seguridad a doble cara automáticamente? (S/N): ").strip().upper()
+        if crear in ["S", "SI"]:
+            duplex_name = f"{default_printer} Doble Cara"
+            log_message(f"Creando impresora duplicada '{duplex_name}'...")
+            
+            # Ejecutar PowerShell para crear la impresora y configurarla
+            ps_cmd = f"""
+            $source = Get-Printer -Name '{default_printer}'
+            Add-Printer -Name '{duplex_name}' -DriverName $source.DriverName -PortName $source.PortName
+            Set-PrintConfiguration -PrinterName '{duplex_name}' -DuplexingMode TwoSidedLongEdge
+            """
+            res = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True)
+            if res.returncode == 0:
+                log_message(f"--> Impresora '{duplex_name}' creada y configurada a DOBLE CARA con éxito.")
+                
+                # También forzar con win32print en la nueva impresora para estar seguros
+                try:
+                    PRINTER_ACCESS_USE = 0x00000008
+                    handle = win32print.OpenPrinter(duplex_name, {"DesiredAccess": PRINTER_ACCESS_USE})
+                    info = win32print.GetPrinter(handle, 9)
+                    devmode = info['pDevMode']
+                    if devmode is not None:
+                        devmode.Duplex = 2
+                        devmode.Fields = devmode.Fields | win32con.DM_DUPLEX
+                        win32print.SetPrinter(handle, 9, info, 0)
+                        log_message("--> Preferencias de usuario configuradas a doble cara vía win32print Level 9.")
+                    win32print.ClosePrinter(handle)
+                except Exception as e:
+                    log_message(f"Advertencia al aplicar win32print Level 9 en la nueva impresora: {e}")
+                    
+                return duplex_name
+            else:
+                log_message(f"Error al crear la impresora duplicada: {res.stderr.strip()}")
+        else:
+            log_message("Creación de impresora omitida.")
+    except Exception as e:
+        log_message(f"Advertencia durante la creación de la impresora de doble cara: {e}")
+        
+    return None
 
 def get_current_duplex_state(printer_name):
-    """Obtiene la configuración original de duplex mediante PowerShell o win32print."""
-    # 1. Intentar con PowerShell
+    """Obtiene la configuración original de duplex para poder restaurarla."""
+    try:
+        import win32print
+        PRINTER_ACCESS_USE = 0x00000008
+        try:
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
+        except Exception:
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ALL_ACCESS})
+            
+        # Intentar con Level 9
+        try:
+            info = win32print.GetPrinter(handle, 9)
+            devmode = info['pDevMode']
+            if devmode is not None:
+                val = getattr(devmode, 'Duplex', None)
+                if val is not None:
+                    win32print.ClosePrinter(handle)
+                    return "win32print_9", val
+        except Exception:
+            pass
+            
+        # Intentar con Level 2
+        try:
+            info = win32print.GetPrinter(handle, 2)
+            devmode = info['pDevMode']
+            if devmode is not None:
+                val = getattr(devmode, 'Duplex', None)
+                if val is not None:
+                    win32print.ClosePrinter(handle)
+                    return "win32print_2", val
+        except Exception:
+            pass
+            
+        win32print.ClosePrinter(handle)
+    except Exception:
+        pass
+
     try:
         cmd = f"(Get-PrintConfiguration -PrinterName '{printer_name}').DuplexingMode"
         res = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
@@ -177,76 +300,134 @@ def get_current_duplex_state(printer_name):
             return "powershell", res.stdout.strip()
     except Exception:
         pass
-
-    # 2. Fallback a win32print
-    try:
-        import win32print
-        PRINTER_ACCESS_USE = 0x00000008
-        handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
-        info = win32print.GetPrinter(handle, 2)
-        devmode = info['pDevMode']
-        original_duplex = getattr(devmode, 'Duplex', 1)
-        win32print.ClosePrinter(handle)
-        return "win32print", original_duplex
-    except Exception:
-        return None, None
+        
+    return None, None
 
 def set_duplex_state(printer_name, duplex=True):
-    """Establece la impresión a doble cara (True) o normal (False)."""
-    mode = "TwoSidedLongEdge" if duplex else "OneSided"
+    """Establece la impresión a doble cara (True) o normal (False) para la impresora."""
+    log_message(f"Configurando dúplex ({duplex}) para '{printer_name}'...")
     
-    # 1. Intentar con PowerShell
+    # 1. Intentar con win32print usando Level 9 (Preferencias de usuario - No requiere Admin)
     try:
+        import win32print
+        import win32con
+        
+        PRINTER_ACCESS_USE = 0x00000008
+        try:
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
+        except Exception:
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ALL_ACCESS})
+            
+        try:
+            try:
+                info = win32print.GetPrinter(handle, 9)
+            except Exception:
+                info2 = win32print.GetPrinter(handle, 2)
+                info = {"pDevMode": info2["pDevMode"]}
+                
+            devmode = info['pDevMode']
+            if devmode is not None:
+                devmode.Duplex = 2 if duplex else 1
+                devmode.Fields = devmode.Fields | win32con.DM_DUPLEX
+                
+                win32print.SetPrinter(handle, 9, info, 0)
+                log_message("--> Dúplex configurado exitosamente vía win32print Level 9 (Preferencias de usuario).")
+                win32print.ClosePrinter(handle)
+                return True
+        except Exception as e:
+            log_message(f"Advertencia al configurar vía win32print Level 9: {e}")
+            if 'handle' in locals():
+                win32print.ClosePrinter(handle)
+    except Exception as e:
+        log_message(f"Advertencia general de win32print Level 9: {e}")
+
+    # 2. Intentar con win32print usando Level 2 (Configuración global - Puede requerir Admin)
+    try:
+        import win32print
+        import win32con
+        handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ALL_ACCESS})
+        try:
+            info = win32print.GetPrinter(handle, 2)
+            devmode = info['pDevMode']
+            if devmode is not None:
+                devmode.Duplex = 2 if duplex else 1
+                devmode.Fields = devmode.Fields | win32con.DM_DUPLEX
+                win32print.SetPrinter(handle, 2, info, 0)
+                log_message("--> Dúplex configurado exitosamente vía win32print Level 2 (Configuración global).")
+                win32print.ClosePrinter(handle)
+                return True
+        except Exception as e:
+            log_message(f"Advertencia al configurar vía win32print Level 2: {e}")
+            if 'handle' in locals():
+                win32print.ClosePrinter(handle)
+    except Exception as e:
+        log_message(f"Advertencia general de win32print Level 2: {e}")
+
+    # 3. Intentar con PowerShell como último recurso
+    try:
+        mode = "TwoSidedLongEdge" if duplex else "OneSided"
         cmd = f"Set-PrintConfiguration -PrinterName '{printer_name}' -DuplexingMode {mode}"
         res = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
         if res.returncode == 0:
-            log_message(f"Impresora configurada a DOBLE CARA ({mode}) vía PowerShell.")
+            log_message(f"--> Dúplex configurado exitosamente ({mode}) vía PowerShell.")
             return True
         else:
-            log_message(f"PowerShell falló con código {res.returncode}: {res.stderr}")
+            log_message(f"Advertencia: PowerShell falló con código {res.returncode}: {res.stderr}")
     except Exception as e:
-        log_message(f"Error al ejecutar PowerShell: {e}")
+        log_message(f"Advertencia al ejecutar PowerShell: {e}")
 
-    # 2. Fallback a win32print
-    try:
-        import win32print
-        PRINTER_ACCESS_USE = 0x00000008
-        handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
-        info = win32print.GetPrinter(handle, 2)
-        devmode = info['pDevMode']
-        devmode.Duplex = 2 if duplex else 1
-        win32print.SetPrinter(handle, 2, info, 0)
-        win32print.ClosePrinter(handle)
-        log_message("Impresora configurada a DOBLE CARA vía win32print.")
-        return True
-    except Exception as e:
-        log_message(f"No se pudo forzar la doble cara vía win32print: {e}")
-        return False
+    return False
 
 def restore_duplex_state(printer_name, method, original_val):
     """Restaura la configuración de impresión a su estado original."""
     if not method or original_val is None:
         return
-    if method == "powershell":
+    log_message(f"Restaurando configuración original de la impresora '{printer_name}'...")
+    
+    if method == "win32print_9":
+        try:
+            import win32print
+            import win32con
+            PRINTER_ACCESS_USE = 0x00000008
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
+            try:
+                info = win32print.GetPrinter(handle, 9)
+            except Exception:
+                info2 = win32print.GetPrinter(handle, 2)
+                info = {"pDevMode": info2["pDevMode"]}
+            devmode = info['pDevMode']
+            if devmode is not None:
+                devmode.Duplex = original_val
+                devmode.Fields = devmode.Fields | win32con.DM_DUPLEX
+                win32print.SetPrinter(handle, 9, info, 0)
+                log_message("--> Configuración original restaurada vía win32print Level 9.")
+            win32print.ClosePrinter(handle)
+        except Exception as e:
+            log_message(f"Error al restaurar vía Level 9: {e}")
+            
+    elif method == "win32print_2":
+        try:
+            import win32print
+            import win32con
+            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": win32print.PRINTER_ALL_ACCESS})
+            info = win32print.GetPrinter(handle, 2)
+            devmode = info['pDevMode']
+            if devmode is not None:
+                devmode.Duplex = original_val
+                devmode.Fields = devmode.Fields | win32con.DM_DUPLEX
+                win32print.SetPrinter(handle, 2, info, 0)
+                log_message("--> Configuración original restaurada vía win32print Level 2.")
+            win32print.ClosePrinter(handle)
+        except Exception as e:
+            log_message(f"Error al restaurar vía Level 2: {e}")
+            
+    elif method == "powershell":
         try:
             cmd = f"Set-PrintConfiguration -PrinterName '{printer_name}' -DuplexingMode {original_val}"
             subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True)
-            log_message("Configuración original de la impresora restaurada vía PowerShell.")
-        except Exception:
-            pass
-    elif method == "win32print":
-        try:
-            import win32print
-            PRINTER_ACCESS_USE = 0x00000008
-            handle = win32print.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
-            info = win32print.GetPrinter(handle, 2)
-            devmode = info['pDevMode']
-            devmode.Duplex = original_val
-            win32print.SetPrinter(handle, 2, info, 0)
-            win32print.ClosePrinter(handle)
-            log_message("Configuración original de la impresora restaurada vía win32print.")
-        except Exception:
-            pass
+            log_message("--> Configuración original restaurada vía PowerShell.")
+        except Exception as e:
+            log_message(f"Error al restaurar vía PowerShell: {e}")
 
 def process_car():
     print("=" * 60)
@@ -513,12 +694,32 @@ def process_car():
         import win32print
         
         # 10a. Configurar la impresora para impresión a doble cara
-        printer_name = win32print.GetDefaultPrinter()
-        log_message(f"Impresora predeterminada detectada: '{printer_name}'")
-        method, original_val = get_current_duplex_state(printer_name)
+        # Mostrar advertencia específica de Kyocera
+        print("\n" + "!" * 60)
+        print("IMPORTANTE (Impresoras Kyocera ECOSYS):")
+        print("Para que la impresión a DOBLE CARA funcione, el driver de la impresora")
+        print("debe tener habilitada la unidad de dúplex en Windows:")
+        print("1. Abre el Panel de Control > Dispositivos e Impresoras.")
+        print("2. Clic derecho sobre tu impresora Kyocera > 'Propiedades de la impresora'.")
+        print("3. Ve a la pestaña 'Configuración de dispositivo' (Device Settings).")
+        print("4. Asegúrate de que 'Unidad de dúplex' (Duplex Unit) esté como 'Instalado'.")
+        print("5. Si está disponible, haz clic en el botón 'Autoconfigurar' (Auto Configure).")
+        print("!" * 60 + "\n")
+
+        # Buscar si hay un perfil duplicado de doble cara o crearlo si lo autoriza el usuario
+        duplex_printer = ensure_duplex_printer_profile()
         
-        # Cambiar el duplex
-        set_duplex_state(printer_name, duplex=True)
+        if duplex_printer:
+            printer_name = duplex_printer
+            method, original_val = None, None
+            log_message(f"Uso de impresora física preconfigurada: '{printer_name}'")
+        else:
+            printer_name = win32print.GetDefaultPrinter()
+            log_message(f"Impresora predeterminada detectada: '{printer_name}'")
+            method, original_val = get_current_duplex_state(printer_name)
+            
+            # Cambiar el duplex en el driver
+            set_duplex_state(printer_name, duplex=True)
 
         # 10b. Imprimir la hoja usando Excel COM
         log_message("Iniciando instancia aislada de Excel en segundo plano...")
@@ -560,7 +761,8 @@ def process_car():
             excel_app.Quit()
 
         # 10c. Restaurar la configuración original de duplex de la impresora
-        restore_duplex_state(printer_name, method, original_val)
+        if method and original_val is not None:
+            restore_duplex_state(printer_name, method, original_val)
             
     except ImportError:
         log_message("Los módulos 'pywin32' o 'win32print' no están instalados en este sistema Python.")
@@ -577,6 +779,9 @@ def process_car():
     return True
 
 def main():
+    # Elevar privilegios al inicio en Windows para garantizar modificaciones en win32print y SetPrinter
+    check_and_elevate()
+
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         log_file = os.path.join(script_dir, "pdi_debug_log.txt")
