@@ -1,0 +1,10 @@
+# Entornos virtuales de Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Respaldos de Excel y archivos temporales de Office
+*_backup.xlsx
+~$*.xlsx
