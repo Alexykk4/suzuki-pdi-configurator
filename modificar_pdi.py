@@ -2,7 +2,22 @@ import os
 import shutil
 import openpyxl
 
-def main():
+def is_jimny_sheet_match(wb, sheet_name, jimny_doors):
+    if not jimny_doors:
+        return True
+    try:
+        sheet = wb[sheet_name]
+        d9_val = str(sheet['D9'].value or '').upper()
+        is_5_door = ('5' in d9_val or '5PTAS' in d9_val or '5 PTS' in d9_val)
+        if jimny_doors == "5" and is_5_door:
+            return True
+        if jimny_doors == "3" and not is_5_door:
+            return True
+    except Exception:
+        pass
+    return False
+
+def process_car():
     print("=" * 60)
     print("  SUZUKI - CONFIGURADOR Y CONFIGURACIÓN RÁPIDA DE PDI")
     print("=" * 60)
@@ -12,13 +27,11 @@ def main():
     excel_file = os.path.join(script_dir, "FORMATO PDI.xlsx")
     
     if not os.path.exists(excel_file):
-        # Intentar en el directorio de trabajo actual
         excel_file = "FORMATO PDI.xlsx"
         if not os.path.exists(excel_file):
-            print(f"Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
+            print("Error: No se encontró el archivo 'FORMATO PDI.xlsx'.")
             print("Por favor, asegúrate de colocar este script en la misma carpeta que el archivo Excel.")
-            input("\nPresiona Enter para salir...")
-            return
+            return False
 
     # 2. Cargar el libro de trabajo (conservando fórmulas)
     print("Cargando formato Excel...")
@@ -26,27 +39,13 @@ def main():
         wb = openpyxl.load_workbook(excel_file)
     except Exception as e:
         print(f"Error al abrir el archivo Excel: {e}")
-        input("\nPresiona Enter para salir...")
-        return
+        return False
 
-    # 3. Extraer modelos disponibles dinámicamente
     sheet_names = wb.sheetnames
-    models_set = set()
-    for name in sheet_names:
-        name_clean = name.strip()
-        if name_clean == "BLANCO PARA TECNICO":
-            continue
-        name_upper = name_clean.upper()
-        if name_upper.startswith("GRAND VITARA"):
-            models_set.add("GRAND VITARA")
-        else:
-            words = name_clean.split()
-            if words:
-                models_set.add(words[0].upper())
-                
-    models_list = sorted(list(models_set))
+
+    # 3. Mostrar únicamente los modelos autorizados
+    models_list = ["BALENO", "SWIFT", "DZIRE", "ERTIGA", "FRONX", "JIMNY"]
     
-    # Preguntar: ¿Qué modelo es?
     print("\nModelos disponibles:")
     for idx, model_opt in enumerate(models_list, 1):
         print(f"  {idx}. {model_opt}")
@@ -61,7 +60,26 @@ def main():
             pass
         print("Opción inválida. Intenta de nuevo.")
 
-    # 4. Extraer líneas disponibles para el modelo seleccionado
+    # Pregunta especial para JIMNY: ¿3 o 5 puertas?
+    jimny_doors = ""
+    if selected_model == "JIMNY":
+        print("\n¿Cuántas puertas tiene el Jimny?")
+        print("  1. 3 PTAS")
+        print("  2. 5 PTAS")
+        while True:
+            try:
+                sel_doors = int(input("Selecciona (1-2): "))
+                if sel_doors == 1:
+                    jimny_doors = "3"
+                    break
+                elif sel_doors == 2:
+                    jimny_doors = "5"
+                    break
+            except ValueError:
+                pass
+            print("Opción inválida. Intenta de nuevo.")
+
+    # 4. Extraer líneas disponibles para el modelo seleccionado (aplicando filtro de puertas si es Jimny)
     lines_set = set()
     for name in sheet_names:
         name_clean = name.strip()
@@ -69,11 +87,13 @@ def main():
         if selected_model == "VITARA" and "GRAND VITARA" in name_upper:
             continue
         if selected_model in name_upper:
-            # Limpiar nombre de hojas
+            # Si es Jimny, aplicar filtro de puertas
+            if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, name_clean, jimny_doors):
+                continue
+                
             cleaned = name_upper.replace("OK", "").replace("(2)", "").strip()
             words = cleaned.split()
             try:
-                # Determinar posición de la transmisión (TA, TM, CVT)
                 model_len = len(selected_model.split())
                 trans_idx = -1
                 for idx, w in enumerate(words):
@@ -90,7 +110,7 @@ def main():
                 
     lines_list = sorted(list(lines_set))
     
-    # Preguntar: ¿Qué línea es?
+    # Seleccionar o escribir la línea
     selected_line = ""
     if lines_list:
         print(f"\nLíneas disponibles para {selected_model}:")
@@ -113,7 +133,7 @@ def main():
     else:
         selected_line = input("\n¿Qué línea es? (ej. GLS, GLX, SPORT): ").strip().upper()
 
-    # Preguntar: ¿Qué transmisión es? (TA, TM o CVT)
+    # Preguntar por la transmisión (TA, TM o CVT)
     print("\nTransmisiones:")
     print("  1. TA")
     print("  2. TM")
@@ -135,7 +155,6 @@ def main():
         print("Opción inválida. Intenta de nuevo.")
 
     # 5. Lógica de búsqueda de la hoja con fallback
-    # Si responde CVT o TA, busca la que exista
     trans_search_order = [selected_trans]
     if selected_trans == "CVT":
         trans_search_order.append("TA")
@@ -144,12 +163,13 @@ def main():
 
     matched_sheet_name = None
     
-    # Buscar por coincidencia exacta de modelo + línea + transmisión
+    # Buscar por coincidencia exacta de modelo + línea + transmisión (y filtro Jimny si aplica)
     for t_option in trans_search_order:
         for sheet_name in sheet_names:
             name_up = sheet_name.upper()
-            # Excluir Grand Vitara si seleccionó Vitara
             if selected_model == "VITARA" and "GRAND VITARA" in name_up:
+                continue
+            if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, sheet_name, jimny_doors):
                 continue
             if (selected_model in name_up) and (selected_line in name_up) and (t_option in name_up):
                 matched_sheet_name = sheet_name
@@ -164,17 +184,21 @@ def main():
                 name_up = sheet_name.upper()
                 if selected_model == "VITARA" and "GRAND VITARA" in name_up:
                     continue
+                if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, sheet_name, jimny_doors):
+                    continue
                 if (selected_model in name_up) and (t_option in name_up):
                     matched_sheet_name = sheet_name
                     break
             if matched_sheet_name:
                 break
 
-    # Si aún no se encuentra, usar la primera hoja que coincida con el modelo
+    # Si aún no se encuentra, usar la primera hoja que coincida con el modelo (y filtro Jimny si aplica)
     if not matched_sheet_name:
         for sheet_name in sheet_names:
             name_up = sheet_name.upper()
             if selected_model == "VITARA" and "GRAND VITARA" in name_up:
+                continue
+            if selected_model == "JIMNY" and not is_jimny_sheet_match(wb, sheet_name, jimny_doors):
                 continue
             if selected_model in name_up:
                 matched_sheet_name = sheet_name
@@ -182,8 +206,7 @@ def main():
 
     if not matched_sheet_name:
         print(f"\nError: No se pudo encontrar ninguna plantilla para {selected_model}.")
-        input("\nPresiona Enter para salir...")
-        return
+        return False
 
     print(f"\n--> Plantilla seleccionada: '{matched_sheet_name}'")
     sheet = wb[matched_sheet_name]
@@ -195,12 +218,11 @@ def main():
     # Obtener el VIN actual de la plantilla
     vin_template = sheet['D10'].value
     if not vin_template:
-        vin_template = "MA3ZFEFS5VA376378" # Valor base por si la celda está vacía
+        vin_template = "MA3ZFEFS5VA376378" # Valor base fallback
     else:
         vin_template = str(vin_template).strip()
 
     # Preguntar por el dígito verificador después de la 'S'
-    # Buscar la S (después de los caracteres de fabricante, ej. index >= 3)
     s_idx = vin_template.upper().find('S', 3)
     if s_idx != -1 and s_idx < len(vin_template) - 1:
         char_after_s_default = vin_template[s_idx + 1]
@@ -211,7 +233,6 @@ def main():
             val_after_s = char_after_s_default
         check_digit_idx = s_idx + 1
     else:
-        # Fallback a la posición estándar del check digit (posición 9, index 8)
         char_after_s_default = vin_template[8] if len(vin_template) > 8 else "X"
         print(f"\nVIN base: {vin_template}")
         val_after_s = input(f"¿Qué número o letra tiene en la 9ª posición del VIN (actualmente '{char_after_s_default}')? ").strip().upper()
@@ -227,9 +248,6 @@ def main():
         print("La terminación debe contener solo números. Intenta de nuevo.")
 
     # 7. Construir el nuevo VIN
-    # El VIN tiene 17 caracteres. Reemplazamos:
-    # - Posición del check digit (check_digit_idx)
-    # - Posición final (los últimos len(vin_end) caracteres)
     vin_len = len(vin_template)
     suffix_len = len(vin_end)
     
@@ -242,15 +260,10 @@ def main():
     print(f"\n--> Nuevo VIN generado: {new_vin}")
 
     # 8. Modificar la hoja de Excel
-    # Modificar D9 (Modelo + Línea + Transmisión + Color)
-    # Limpiamos el nombre de la pestaña de sufijos como OK o (2)
     clean_sheet_title = matched_sheet_name.replace("OK", "").replace("(2)", "").strip()
     sheet['D9'].value = f"{clean_sheet_title} {color}".strip()
-    
-    # Modificar D10 (VIN)
     sheet['D10'].value = new_vin
     
-    # Modificar D11 (Número de llave) si se ingresó algo
     if key_num:
         sheet['D11'].value = key_num
 
@@ -273,8 +286,7 @@ def main():
     except Exception as e:
         print(f"Error al guardar los cambios: {e}")
         print("Asegúrate de que el archivo Excel no esté abierto en otro programa.")
-        input("\nPresiona Enter para salir...")
-        return
+        return False
 
     # 10. Comando de impresión rápida para Windows
     print("\n" + "=" * 40)
@@ -285,19 +297,29 @@ def main():
     
     try:
         import win32com.client
-        print("Iniciando Excel en segundo plano para imprimir...")
-        
-        excel_app = win32com.client.Dispatch("Excel.Application")
+        print("Iniciando instancia aislada de Excel en segundo plano...")
+        # Usar DispatchEx para forzar una nueva instancia libre de bloqueos
+        excel_app = win32com.client.DispatchEx("Excel.Application")
         excel_app.Visible = False
         
         try:
             workbook = excel_app.Workbooks.Open(abs_excel_path)
-            active_sheet = workbook.ActiveSheet
-            print(f"Mandando a imprimir la hoja: '{active_sheet.Title}'...")
-            # Imprime únicamente la hoja activa
-            active_sheet.PrintOut()
-            workbook.Close(False)
-            print("¡Impresión enviada correctamente a tu impresora predeterminada!")
+            if workbook is None:
+                # Si fallara, intentar capturar la ventana activa
+                workbook = excel_app.ActiveWorkbook
+                
+            if workbook is not None:
+                active_sheet = workbook.ActiveSheet
+                if active_sheet is not None:
+                    # En Excel COM la propiedad se llama 'Name' (no 'Title')
+                    print(f"Mandando a imprimir la hoja activa: '{active_sheet.Name}'...")
+                    active_sheet.PrintOut()
+                else:
+                    print("Error: No se pudo acceder a la hoja activa.")
+                workbook.Close(False)
+                print("¡Impresión enviada correctamente a tu impresora predeterminada!")
+            else:
+                print("Error: Excel no pudo abrir el libro de trabajo.")
         except Exception as e:
             print(f"Error durante el proceso de impresión con Excel: {e}")
         finally:
@@ -310,16 +332,27 @@ def main():
             try:
                 os.startfile(abs_excel_path, "print")
                 print("¡Comando de impresión de Windows ejecutado!")
-                print("Nota: Esto abrirá Excel brevemente para mandar el documento a la impresora.")
             except Exception as e:
                 print(f"No se pudo imprimir automáticamente: {e}")
         else:
             print("El comando de impresión rápida de Windows (os.startfile) no está disponible en este sistema operativo.")
-        print("\nPara habilitar la impresión silenciosa y precisa en Windows, instala pywin32:")
-        print("  pip install pywin32")
+            
+    return True
 
-    print("\nProceso finalizado.")
-    input("Presiona Enter para salir...")
+def main():
+    while True:
+        # Ejecutar el flujo para un vehículo
+        process_car()
+        
+        # Preguntar si desea continuar o salir
+        print("\n" + "-" * 60)
+        opcion = input("¿Deseas configurar otro automóvil? (S/N): ").strip().upper()
+        if opcion not in ["S", "SI"]:
+            print("\n¡Gracias por utilizar la herramienta Suzuki PDI Configurator!")
+            print("Proceso finalizado.")
+            input("Presiona Enter para salir...")
+            break
+        print("\n" * 2) # Espaciado entre ejecuciones
 
 if __name__ == "__main__":
     main()
