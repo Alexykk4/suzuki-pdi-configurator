@@ -25,25 +25,20 @@ def strip_printer_settings_from_zip(xlsx_path):
     temp_zip_path = os.path.join(temp_dir, "temp.zip")
     
     try:
-        # Hacer una copia temporal del archivo
         shutil.copyfile(xlsx_path, temp_zip_path)
         
-        # Procesar los elementos del ZIP
         with zipfile.ZipFile(temp_zip_path, 'r') as zin:
             with zipfile.ZipFile(xlsx_path, 'w', zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
                     filename = item.filename
                     
-                    # 1. Omitir la carpeta printerSettings y sus archivos binarios
                     if "printerSettings" in filename:
                         continue
                         
                     data = zin.read(filename)
                     
-                    # 2. Eliminar referencias de printerSettings en los archivos de relaciones (.rels) de las hojas
                     if filename.startswith("xl/worksheets/_rels/") and filename.endswith(".xml.rels"):
                         data_str = data.decode('utf-8', errors='ignore')
-                        # Quitar etiquetas de relación tipo printerSettings
                         data_str = re.sub(
                             r'<Relationship[^>]*relationships/printerSettings[^>]*/>', 
                             '', 
@@ -51,13 +46,11 @@ def strip_printer_settings_from_zip(xlsx_path):
                         )
                         data = data_str.encode('utf-8')
                         
-                    # 3. Eliminar el atributo r:id que vincula printerSettings en el tag <pageSetup> de cada hoja
                     elif filename.startswith("xl/worksheets/sheet") and filename.endswith(".xml"):
                         data_str = data.decode('utf-8', errors='ignore')
                         
                         def clean_pagesetup(match):
                             tag = match.group(0)
-                            # Remover el atributo r:id="..."
                             tag_cleaned = re.sub(r'\s+r:id="[^"]+"', '', tag)
                             return tag_cleaned
                         
@@ -121,6 +114,58 @@ def get_excel_printer_string(printer_name):
         log_message(f"Advertencia al leer el puerto de la impresora del registro: {e}")
         
     return printer_name
+
+def set_excel_active_printer(excel_app, printer_name):
+    """Prueba dinámicamente diferentes puertos de red (Ne00 a Ne99) en inglés y español para configurar ActivePrinter."""
+    # 1. Intentar configurar directamente
+    try:
+        excel_app.ActivePrinter = printer_name
+        log_message(f"Impresora activa configurada directamente en Excel: '{printer_name}'")
+        return True
+    except Exception:
+        pass
+
+    # 2. Intentar puertos en Inglés (e.g. "Nombre on Ne01:")
+    for i in range(100):
+        try:
+            port_str = f"{printer_name} on Ne{i:02d}:"
+            excel_app.ActivePrinter = port_str
+            log_message(f"Impresora activa configurada en Excel: '{port_str}'")
+            return True
+        except Exception:
+            pass
+
+    # 3. Intentar puertos en Español (e.g. "Nombre en Ne01:")
+    for i in range(100):
+        try:
+            port_str = f"{printer_name} en Ne{i:02d}:"
+            excel_app.ActivePrinter = port_str
+            log_message(f"Impresora activa configurada en Excel: '{port_str}' (Windows en Español)")
+            return True
+        except Exception:
+            pass
+
+    # 4. Fallback leyendo el registro de Windows
+    excel_printer_str = get_excel_printer_string(printer_name)
+    if excel_printer_str != printer_name:
+        try:
+            excel_app.ActivePrinter = excel_printer_str
+            log_message(f"Impresora activa configurada desde Registro: '{excel_printer_str}'")
+            return True
+        except Exception:
+            pass
+
+        # Probar la versión traducida al español del registro
+        if " on " in excel_printer_str:
+            spanish_str = excel_printer_str.replace(" on ", " en ")
+            try:
+                excel_app.ActivePrinter = spanish_str
+                log_message(f"Impresora activa configurada desde Registro (Español): '{spanish_str}'")
+                return True
+            except Exception:
+                pass
+
+    raise Exception("No se pudo asociar la impresora con ningún puerto de red de Excel (NeXX:).")
 
 def get_current_duplex_state(printer_name):
     """Obtiene la configuración original de duplex mediante PowerShell o win32print."""
@@ -454,7 +499,6 @@ def process_car():
         return False
 
     # 9.5 LIMPIAR CACHÉ DE IMPRESORA DEL ZIP (.xlsx)
-    # Esto elimina toda preferencia de impresora previa del archivo
     strip_printer_settings_from_zip(excel_file)
 
     # 10. Comando de impresión rápida para Windows
@@ -483,14 +527,10 @@ def process_car():
         
         try:
             workbook = excel_app.Workbooks.Open(abs_excel_path)
-            if workbook is None:
-                workbook = excel_app.ActiveWorkbook
-                
+            
             # Forzar ActivePrinter después de abrir el libro para obligar a Excel a recargar el driver
             try:
-                excel_printer_str = get_excel_printer_string(printer_name)
-                excel_app.ActivePrinter = excel_printer_str
-                log_message(f"Impresora activa configurada en Excel: '{excel_printer_str}' (fuerza recarga de driver)")
+                set_excel_active_printer(excel_app, printer_name)
             except Exception as pe:
                 log_message(f"Advertencia: No se pudo asignar ActivePrinter en Excel: {pe}")
 
@@ -537,7 +577,6 @@ def process_car():
     return True
 
 def main():
-    # Eliminar log de depuración viejo al iniciar
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         log_file = os.path.join(script_dir, "pdi_debug_log.txt")
