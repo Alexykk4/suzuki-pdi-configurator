@@ -19,6 +19,39 @@ def is_jimny_sheet_match(wb, sheet_name, jimny_doors):
         pass
     return False
 
+def get_excel_printer_string(printer_name):
+    """Encuentra el puerto (ej. 'on Ne01:') del registro de Windows para construir la cadena ActivePrinter de Excel."""
+    if os.name != 'nt':
+        return printer_name
+    try:
+        import winreg
+        for key_path in [
+            r"Software\Microsoft\Windows NT\CurrentVersion\Devices",
+            r"Software\Microsoft\Windows NT\CurrentVersion\PrinterPorts"
+        ]:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+                i = 0
+                while True:
+                    try:
+                        name, value, _ = winreg.EnumValue(key, i)
+                        if name.lower().strip() == printer_name.lower().strip():
+                            parts = value.split(",")
+                            if len(parts) >= 2:
+                                port = parts[1]
+                                winreg.CloseKey(key)
+                                return f"{name} on {port}"
+                        i += 1
+                    except OSError:
+                        break
+                winreg.CloseKey(key)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"Advertencia al leer el puerto de la impresora del registro: {e}")
+        
+    return printer_name
+
 def get_current_duplex_state(printer_name):
     """Obtiene la configuración original de duplex mediante PowerShell o win32print."""
     # 1. Intentar con PowerShell (compatible con usuarios estándar y redes)
@@ -377,6 +410,14 @@ def process_car():
             if workbook is None:
                 workbook = excel_app.ActiveWorkbook
                 
+            # Forzar ActivePrinter después de abrir el libro para obligar a Excel a recargar el driver
+            try:
+                excel_printer_str = get_excel_printer_string(printer_name)
+                excel_app.ActivePrinter = excel_printer_str
+                print(f"Impresora activa configurada en Excel: '{excel_printer_str}' (fuerza recarga de driver)")
+            except Exception as pe:
+                print(f"Advertencia: No se pudo asignar ActivePrinter en Excel: {pe}")
+
             if workbook is not None:
                 active_sheet = workbook.ActiveSheet
                 if active_sheet is not None:
